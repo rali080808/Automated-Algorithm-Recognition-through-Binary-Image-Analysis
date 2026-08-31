@@ -1,21 +1,7 @@
-"""
-Classifying DFS against Fenwick-tree binaries with two pretrained backbones.
 
-Runs on CPU. Set FAST_SANITY_CHECK = True for a short run that exercises the
-whole pipeline before committing to the full one.
-
-Usage:
-    python algo_classifier.py
-
-Expects:
-    dataset/
-        DFS/       *.png
-        fenwick/   *.png
-"""
 
 import os
 
-# Must be set before TensorFlow is imported to have any effect.
 os.environ["TF_DETERMINISTIC_OPS"] = "1"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
@@ -38,9 +24,6 @@ from tensorflow.keras.applications import MobileNetV2, EfficientNetB0
 from sklearn.metrics import confusion_matrix, classification_report
 
 
-# ============================================================
-# Configuration
-# ============================================================
 
 
 SEED = 42
@@ -52,11 +35,11 @@ VAL_FRACTION = 0.2
 
 
 BATCH_SIZE = 16
-EPOCHS_HEAD = 80  # phase 1: backbone frozen, train the head
-EPOCHS_FINETUNE = 30  # phase 2: unfreeze the top of the backbone
+EPOCHS_HEAD = 80
+EPOCHS_FINETUNE = 30
 LR_HEAD = 5e-4
-LR_FINETUNE = 5e-5  # 10x lower, so fine-tuning cannot wreck the features
-UNFREEZE_FROM = 200  # backbone layers before this index stay frozen
+LR_FINETUNE = 5e-5
+UNFREEZE_FROM = 200
 
 
 PATIENCE_STOP = 10
@@ -100,17 +83,10 @@ def out(filename):
     return os.path.join(OUTPUT_DIR, filename)
 
 
-# ============================================================
-# Data
-# ============================================================
 
 
 def build_split():
-    """Build the train/validation split once and return file lists and labels.
-
-    Everything downstream uses these lists and never re-reads the directory,
-    so training and evaluation cannot disagree about which images are held out.
-    """
+  
     if not os.path.isdir(DATASET_DIR):
         raise SystemExit(
             f"Dataset directory '{DATASET_DIR}' not found.\n"
@@ -141,8 +117,6 @@ def build_split():
         if not files:
             raise SystemExit(f"No images found in {class_dir}")
 
-        # sorted() then a seeded shuffle: identical split on every run, and
-        # independent of the order the filesystem happens to return.
         rng = random.Random(SEED + label)
         rng.shuffle(files)
 
@@ -163,27 +137,16 @@ def build_split():
 
 
 def decode_image(path, label, num_classes):
-    """Read one image as float32 in [0, 255].
-
-    No scaling happens here; each model rescales its own input, so this
-    pipeline stays neutral and cannot disagree with them.
-    """
+  
     raw = tf.io.read_file(path)
     img = tf.image.decode_image(raw, channels=3, expand_animations=False)
     img.set_shape([None, None, 3])
-    img = tf.image.resize(img, IMAGE_SIZE)  # returns float32
+    img = tf.image.resize(img, IMAGE_SIZE)
     return img, tf.one_hot(label, depth=num_classes)
 
 
 def build_augmentation():
-    """Mild, structure-preserving augmentation.
 
-    Deliberately absent:
-      - flips: a binary image is a byte stream folded into a rectangle, so
-        mirroring reorders the machine instructions
-      - Gaussian noise: individual opcode bytes do not survive it
-      - random crops: they delete whole subroutines
-    """
     return tf.keras.Sequential(
         [
             layers.RandomRotation(0.02, fill_mode="constant", fill_value=255.0),
@@ -198,12 +161,7 @@ def build_augmentation():
 
 
 def make_datasets(train_files, train_labels, val_files, val_labels, num_classes):
-    """Build the tf.data pipelines.
-
-    Ordering is cache -> shuffle -> batch -> augment: caching decodes and
-    resizes each image once rather than every epoch, and augmenting after
-    batching lets the preprocessing layers run vectorized over the batch.
-    """
+ 
     augment = build_augmentation()
 
     train_ds = (
@@ -222,8 +180,6 @@ def make_datasets(train_files, train_labels, val_files, val_labels, num_classes)
         .prefetch(tf.data.AUTOTUNE)
     )
 
-    # No augmentation and no shuffling on validation: it must be the same fixed
-    # set every time or the numbers are not comparable across epochs.
     val_ds = (
         tf.data.Dataset.from_tensor_slices((val_files, val_labels))
         .map(
@@ -238,19 +194,10 @@ def make_datasets(train_files, train_labels, val_files, val_labels, num_classes)
     return train_ds, val_ds
 
 
-# ============================================================
-# Models
-# ============================================================
 
 
 def build_model(model_type, num_classes):
-    """Build a model that rescales its own input.
-
-    MobileNetV2 expects [-1, 1]; Rescaling(1/127.5, -1) is what
-    mobilenet_v2.preprocess_input computes. EfficientNetB0 expects raw
-    [0, 255], since its Rescaling and Normalization layers are already part of
-    the graph, so nothing is inserted.
-    """
+ 
     inputs = tf.keras.Input(shape=IMAGE_SIZE + (3,), name="image_0_255")
 
     if model_type == "MobileNetV2":
@@ -259,7 +206,7 @@ def build_model(model_type, num_classes):
             input_shape=IMAGE_SIZE + (3,), include_top=False, weights="imagenet"
         )
     elif model_type == "EfficientNetB0":
-        x = inputs  # EfficientNet normalizes internally; do not touch the input
+        x = inputs
         base = EfficientNetB0(
             input_shape=IMAGE_SIZE + (3,), include_top=False, weights="imagenet"
         )
@@ -268,9 +215,6 @@ def build_model(model_type, num_classes):
 
     base.trainable = False
 
-    # training=False keeps the backbone's BatchNorm layers in inference mode,
-    # so their pretrained running statistics are used rather than recomputed
-    # from these small batches.
     x = base(x, training=False)
     x = layers.GlobalAveragePooling2D()(x)
     x = layers.Dropout(0.3)(x)
@@ -294,7 +238,6 @@ def build_model(model_type, num_classes):
 
 
 def make_callbacks(model_type):
-    """Early stopping and learning-rate reduction, both on validation loss."""
     return [
         tf.keras.callbacks.EarlyStopping(
             monitor="val_loss",
@@ -313,7 +256,7 @@ def make_callbacks(model_type):
 
 
 def train_model(model_type, model, base, train_ds, val_ds):
-    """Two-phase transfer learning."""
+   
     print(f"\nPhase 1 -- training the head ({EPOCHS_HEAD} epochs, backbone frozen)")
     history_head = model.fit(
         train_ds,
@@ -330,9 +273,6 @@ def train_model(model_type, model, base, train_ds, val_ds):
     for i, layer in enumerate(base.layers):
         if i < UNFREEZE_FROM:
             layer.trainable = False
-        # Backbone BatchNorm stays frozen regardless of depth: with this few
-        # training images, recomputing the statistics costs more than the extra
-        # capacity is worth.
         if isinstance(layer, layers.BatchNormalization):
             layer.trainable = False
 
@@ -358,17 +298,10 @@ def train_model(model_type, model, base, train_ds, val_ds):
     return history_head, history_fine
 
 
-# ============================================================
-# Evaluation
-# ============================================================
 
 
 def wilson_interval(correct, total, z=1.96):
-    """95% Wilson confidence interval for a proportion.
-
-    Reported because the evaluation sets are small: at n=20 the interval is
-    roughly +/- 20 percentage points.
-    """
+   
     if total == 0:
         return 0.0, 0.0
     p = correct / total
@@ -379,7 +312,7 @@ def wilson_interval(correct, total, z=1.96):
 
 
 def evaluate(model_type, model, files, labels, class_names, split_name):
-    """Score a file list in a single batched pass."""
+
     num_classes = len(class_names)
     ds = (
         tf.data.Dataset.from_tensor_slices((files, labels))
@@ -428,17 +361,10 @@ def evaluate(model_type, model, files, labels, class_names, split_name):
     }
 
 
-# ============================================================
-# Plots
-# ============================================================
 
 
 def plot_augmentation_preview(train_files, class_names):
-    """Show one training image and several augmented copies of it.
 
-    Checks that the byte-level structure carrying the label survives
-    augmentation.
-    """
     augment = build_augmentation()
     path = train_files[0]
     raw, _ = decode_image(tf.constant(path), 0, len(class_names))
@@ -455,7 +381,7 @@ def plot_augmentation_preview(train_files, class_names):
         axes[i + 1].set_title(f"augmented {i + 1}", fontsize=10)
         axes[i + 1].axis("off")
     fig.suptitle(
-        "Augmentation preview -- the structure must stay readable", fontsize=13
+        "Augmentation preview - the structure must stay readable", fontsize=13
     )
     fig.tight_layout()
     fig.savefig(out("augmentation_preview.png"), dpi=130)
@@ -464,8 +390,7 @@ def plot_augmentation_preview(train_files, class_names):
 
 
 def plot_training_curves(model_type, history_head, history_fine):
-    """Accuracy and loss across both phases, with the phase boundary marked."""
-
+  
     def joined(key):
         return list(history_head.history[key]) + list(history_fine.history[key])
 
@@ -506,11 +431,7 @@ def plot_training_curves(model_type, history_head, history_fine):
 
 
 def plot_confusion(model_type, result, class_names, split_name):
-    """Counts and row-normalized recall side by side.
 
-    The normalized panel reveals a model that has collapsed onto one label,
-    which a raw accuracy figure hides.
-    """
     cm = confusion_matrix(
         result["y_true"], result["y_pred"], labels=range(len(class_names))
     )
@@ -560,7 +481,6 @@ def plot_comparison(results, class_names):
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-    # Validation accuracy with confidence intervals.
     accs = [results[m]["val"]["accuracy"] for m in models]
     errs = np.array(
         [
@@ -584,7 +504,6 @@ def plot_comparison(results, class_names):
     for i, v in enumerate(accs):
         axes[0, 0].text(i, v + 0.03, f"{v:.1%}", ha="center", fontweight="bold")
 
-    # Training accuracy alongside it, so the gap between them is visible.
     x = np.arange(len(models))
     width = 0.35
     axes[0, 1].bar(
@@ -608,7 +527,6 @@ def plot_comparison(results, class_names):
     axes[0, 1].set_title("Train vs. validation")
     axes[0, 1].legend()
 
-    # Per-class recall on validation.
     xc = np.arange(len(class_names))
     for i, m in enumerate(models):
         vals = [results[m]["val"]["per_class"].get(c, 0) for c in class_names]
@@ -627,7 +545,6 @@ def plot_comparison(results, class_names):
     axes[1, 0].set_title("Per-class recall (validation)")
     axes[1, 0].legend()
 
-    # Training time.
     times = [results[m]["training_time"] for m in models]
     axes[1, 1].bar(models, times, color=[MODEL_COLORS[m] for m in models])
     axes[1, 1].set_ylabel("seconds")
@@ -646,13 +563,7 @@ def plot_comparison(results, class_names):
 
 
 def plot_preprocessing_diagnostic(sample_file):
-    """Compare EfficientNetB0 features under correct and naive input scaling.
 
-    Passes one image through the untrained backbone twice, once as raw
-    [0, 255] as the model expects and once divided by 255, and compares the
-    resulting feature vectors. Quantifies what the reflex normalization of most
-    image pipelines costs, without training anything.
-    """
     print("\nPreprocessing diagnostic (no training involved)")
     print("-" * 60)
 
@@ -698,18 +609,10 @@ def plot_preprocessing_diagnostic(sample_file):
     print(f"  wrote {out('preprocessing_diagnostic.png')}")
 
 
-# ============================================================
-# Cross-validation
-# ============================================================
 
 
 def build_folds(n_splits):
-    """Stratified k-fold assignment over the whole dataset.
-
-    Each class is shuffled under a fixed seed and dealt round-robin into the
-    folds, so every fold holds the same number of images from each class. Every
-    image is then validated exactly once, by a model that did not train on it.
-    """
+ 
     class_names = sorted(
         d
         for d in os.listdir(DATASET_DIR)
@@ -733,10 +636,7 @@ def build_folds(n_splits):
 
 
 def binomial_p_value(correct, total):
-    """One-sided P(X >= correct) under X ~ Binomial(total, 0.5).
-
-    The probability of scoring this well or better by guessing.
-    """
+ 
     if total == 0:
         return 1.0
     tail = sum(math.comb(total, k) for k in range(correct, total + 1))
@@ -744,14 +644,7 @@ def binomial_p_value(correct, total):
 
 
 def train_one_fold(model_type, train_pairs, val_pairs, num_classes):
-    """Train one fold on a fixed schedule and return its history and predictions.
-
-    No callbacks are used here. Early stopping with weight restoration selects
-    the reported weights using the same images that then score them, which on a
-    twenty-image fold is a substantial source of optimistic bias. Each fold
-    therefore runs a fixed number of epochs at a fixed learning rate, and the
-    final-epoch weights are the ones evaluated.
-    """
+   
     train_files = [p for p, _ in train_pairs]
     train_labels = [l for _, l in train_pairs]
     val_files = [p for p, _ in val_pairs]
@@ -808,7 +701,6 @@ def train_one_fold(model_type, train_pairs, val_pairs, num_classes):
 
 
 def run_cross_validation(class_names, folds):
-    """Run k-fold CV for every model and return pooled out-of-fold results."""
     num_classes = len(class_names)
     cv_results = {}
 
@@ -992,7 +884,6 @@ def plot_cv_summary(cv_results, class_names):
     fig = plt.figure(figsize=(14, 10))
     gs = fig.add_gridspec(2, len(models), height_ratios=[1, 1])
 
-    # Top left: per-fold accuracy, one point per fold.
     ax = fig.add_subplot(gs[0, 0])
     for i, m in enumerate(models):
         accs = cv_results[m]["fold_accs"]
@@ -1025,7 +916,6 @@ def plot_cv_summary(cv_results, class_names):
     ax.set_axisbelow(True)
     ax.legend(fontsize=8)
 
-    # Top right: pooled accuracy with CI.
     ax = fig.add_subplot(gs[0, -1])
     accs = [cv_results[m]["pooled_acc"] for m in models]
     errs = np.array(
@@ -1058,7 +948,6 @@ def plot_cv_summary(cv_results, class_names):
     ax.grid(True, axis="y", linestyle="--", alpha=0.45)
     ax.set_axisbelow(True)
 
-    # Bottom: pooled confusion matrix per model.
     for i, m in enumerate(models):
         ax = fig.add_subplot(gs[1, i])
         cm = confusion_matrix(
@@ -1099,9 +988,6 @@ def plot_cv_summary(cv_results, class_names):
     print(f"  wrote {out('cv_summary.png')}")
 
 
-# ============================================================
-# Main
-# ============================================================
 
 
 def main():
